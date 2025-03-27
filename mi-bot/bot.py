@@ -454,10 +454,11 @@ async def on_message(message):
     if message.author == client.user:
         return
     
+    # Comando básico de prueba
     if message.content.lower() == 'hola':
-        await message.channel.send('¡Hola! Soy un bot hecho en Python. 🤖')
+        await message.channel.send('¡Hola! Soy un bot de Mafia. 🤖')
     
-    # Comandos de Mafia
+    # Comandos de Mafia (!mafia crear/unirme)
     if message.content.startswith('!mafia'):
         comando = message.content.split()
         
@@ -488,68 +489,65 @@ async def on_message(message):
         else:
             await message.channel.send("❌ Comando no reconocido. Usa `!mafia crear <jugadores>` o `!mafia unirme`")
 
-
-    # Comandos durante el juego
-    if message.channel.id in partidas and partidas[str(message.channel.id)]["estado"] != FaseJuego.ESPERANDO:
-        partida = partidas[str(message.channel.id)]
+    # Comandos durante el juego (DMs y canal)
+    canal_id = str(message.channel.id)
+    if canal_id in partidas and partidas[canal_id]["estado"] != FaseJuego.ESPERANDO:
+        partida = partidas[canal_id]
         
-        # Comandos de noche (solo en DMs)
+        # Comandos PRIVADOS (DMs)
         if isinstance(message.channel, discord.DMChannel):
-            jugadores = jugadores_por_partida[str(message.channel.id)]
+            jugadores = jugadores_por_partida[canal_id]
             jugador = next((j for j in jugadores if j["id"] == str(message.author.id)), None)
             
-            if jugador and jugador["vivo"]:
-                if partida["estado"] == FaseJuego.NOCHE:
-                    if message.content.startswith('!matar') and jugador["rol"] == "Mafioso":
-                        victima = ' '.join(message.content.split()[1:])
-                        await procesar_voto_matar(str(message.author.id), victima, str(message.channel.id))
-                        return
+            if not jugador:
+                await message.channel.send("⚠️ No estás en una partida activa.")
+                return
+                
+            if not jugador["vivo"]:
+                await message.channel.send("💀 Ya has sido eliminado de la partida.")
+                return
+            
+            # Comandos de noche
+            if partida["estado"] == FaseJuego.NOCHE:
+                if message.content.startswith('!matar') and jugador["rol"] == "Mafioso":
+                    victima = ' '.join(message.content.split()[1:])
+                    if await procesar_voto_matar(str(message.author.id), victima, canal_id):
+                        await message.channel.send(f"✅ Voto para matar a {victima} registrado.")
+                    else:
+                        await message.channel.send("❌ No puedes matar a ese jugador.")
+                    return
                     
-                    # Aquí podrías añadir !proteger para el doctor y !investigar para el detective
+                elif message.content.startswith('!proteger') and jugador["rol"] == "Doctor":
+                    protegido = ' '.join(message.content.split()[1:])
+                    # Implementación real de protección
+                    await message.channel.send(f"🛡️ Has protegido a {protegido} (acción registrada)")
+                    return
                     
-        # Comando del moderador para avanzar fases
+                elif message.content.startswith('!investigar') and jugador["rol"] == "Detective":
+                    investigado = ' '.join(message.content.split()[1:])
+                    # Implementación real de investigación
+                    await message.channel.send(f"🔍 Has investigado a {investigado} (acción registrada)")
+                    return
+            
+            # Comandos de votación diurna
+            elif partida["estado"] == FaseJuego.VOTACION:
+                if message.content.startswith('!votar'):
+                    votado = ' '.join(message.content.split()[1:])
+                    if await procesar_voto_lynch(str(message.author.id), votado, canal_id):
+                        await message.channel.send(f"✅ Voto para linchar a {votado} registrado.")
+                    else:
+                        await message.channel.send("❌ Voto no válido.")
+                    return
+        
+        # Comandos PÚBLICOS (solo para moderadores)
         if message.content.startswith('!siguiente') and message.author.guild_permissions.administrator:
             if partida["estado"] == FaseJuego.NOCHE:
-                await finalizar_noche(str(message.channel.id))
-                return
+                await finalizar_noche(canal_id)
+                await message.channel.send("🌅 La noche ha terminado. ¡Es de día!")
             elif partida["estado"] == FaseJuego.DIA:
-                await iniciar_votacion(str(message.channel.id))
-                return
+                await iniciar_votacion(canal_id)
             elif partida["estado"] == FaseJuego.VOTACION:
-                await finalizar_votacion(str(message.channel.id))
-                await iniciar_noche(str(message.channel.id))
-                return
-            
-    if str(message.channel.id) in partidas and partidas[str(message.channel.id)]["estado"] != FaseJuego.ESPERANDO:
-        partida = partidas[str(message.channel.id)]
-        
-        # Comandos de noche (solo en DMs)
-        if isinstance(message.channel, discord.DMChannel):
-            jugadores = jugadores_por_partida[str(message.channel.id)]
-            jugador = next((j for j in jugadores if j["id"] == str(message.author.id)), None)
-            
-            if jugador and jugador["vivo"]:
-                if partida["estado"] == FaseJuego.NOCHE:
-                    if message.content.startswith('!matar') and jugador["rol"] == "Mafioso":
-                        victima = ' '.join(message.content.split()[1:])
-                        await procesar_voto_matar(str(message.author.id), victima, str(message.channel.id))
-                        return
-                    elif message.content.startswith('!proteger') and jugador["rol"] == "Doctor":
-                        protegido = ' '.join(message.content.split()[1:])
-                        # Implementar lógica de protección
-                        await message.channel.send(f"🛡️ Has protegido a {protegido} (función por implementar)")
-                        return
-                    elif message.content.startswith('!investigar') and jugador["rol"] == "Detective":
-                        investigado = ' '.join(message.content.split()[1:])
-                        # Implementar lógica de investigación
-                        await message.channel.send(f"🔍 Has investigado a {investigado} (función por implementar)")
-                        return
-                
-                # Comandos de día (votación)
-                elif partida["estado"] == FaseJuego.VOTACION:
-                    if message.content.startswith('!votar'):
-                        votado = ' '.join(message.content.split()[1:])
-                        await procesar_voto_lynch(str(message.author.id), votado, str(message.channel.id))
-                        return
+                await finalizar_votacion(canal_id)
+                await iniciar_noche(canal_id)
 # Iniciar el bot
 client.run(TOKEN)
