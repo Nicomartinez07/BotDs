@@ -9,10 +9,12 @@ from enum import Enum, auto
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 
-# Crear cliente
 intents = discord.Intents.default()
-intents.message_content = True
-intents.members = True  # Necesario para enviar mensajes privados
+intents.message_content = True  # Para leer mensajes
+intents.messages = True        # Necesario para DMs
+intents.dm_messages = True     # Específico para mensajes directos
+intents.members = True         # Para ver información de usuarios
+
 client = discord.Client(intents=intents)
 
 # Estructura para almacenar partidas
@@ -51,7 +53,7 @@ async def crear_partida(canal_id: str, creador_id: str, num_jugadores: int):
     if canal_id in partidas:
         return "⚠️ Ya hay una partida en curso en este canal."
     
-    if num_jugadores < 5:
+    if num_jugadores < 4:
         return "❌ Se necesitan al menos 5 jugadores para una partida de Mafia."
     
     partidas[canal_id] = {
@@ -231,48 +233,95 @@ async def iniciar_noche(canal_id: str):
     
     return True
 
-async def procesar_voto_matar(mafioso_id: str, victima_nombre: str, canal_id: str):
-    """Procesa el voto de un mafioso para eliminar a un jugador"""
+def procesar_nombre_jugador(input_str: str, jugadores: List[Dict]) -> Optional[Dict]:
+    """Convierte '@Bianca' o 'Bianca' al jugador correspondiente"""
+    input_str = input_str.strip()
+    
+    # Caso 1: Es una mención (@Bianca o <@ID>)
+    if input_str.startswith('@'):
+        nombre_buscado = input_str[1:].lower()
+        for j in jugadores:
+            if j["nombre"].lower().startswith(nombre_buscado):
+                return j
+    elif input_str.startswith('<@') and input_str.endswith('>'):
+        id_buscado = input_str[2:-1].replace('!', '')
+        return next((j for j in jugadores if j["id"] == id_buscado), None)
+    
+    # Caso 2: Es un nombre plano (Bianca)
+    input_lower = input_str.lower()
+    for j in jugadores:
+        if input_lower in j["nombre"].lower():
+            return j
+    
+    return None
+
+async def procesar_voto_matar(mafioso_id: str, nombre_victima: str, canal_id: str):
+    """Procesa el voto de un mafioso para eliminar a un jugador por NOMBRE (no mención)"""
+    print(f"[DEBUG] Procesando voto para matar a '{nombre_victima}'")
+    
     if canal_id not in partidas:
+        print("[DEBUG] No hay partida activa en este canal")
         return False
     
     partida = partidas[canal_id]
     
     # Verificar que sea de noche
     if partida["estado"] != FaseJuego.NOCHE:
+        print(f"[DEBUG] No es noche (estado actual: {partida['estado']})")
         return False
     
-    # Verificar que el que vota es mafioso
     jugadores = jugadores_por_partida[canal_id]
+    
+    # 1. Verificar que el votante es mafioso vivo
     mafioso = next((j for j in jugadores if j["id"] == mafioso_id and j["rol"] == "Mafioso" and j["vivo"]), None)
     if not mafioso:
+        print(f"[DEBUG] El jugador {mafioso_id} no es mafioso vivo")
         return False
     
-    # Verificar que la víctima existe y está viva
-    victima = next((j for j in jugadores if j["nombre"] == victima_nombre and j["vivo"] and j["rol"] != "Mafioso"), None)
+    # Buscar víctima (soporta ambos formatos)
+    victima = procesar_nombre_jugador(nombre_victima, jugadores)  # Cambiado de input_victima a nombre_victima
+    
     if not victima:
+        print(f"[DEBUG] No se encontró jugador válido con nombre: {nombre_victima}")
+        print(f"[DEBUG] Jugadores disponibles: {[j['nombre'] for j in jugadores if j['vivo'] and j['rol'] != 'Mafioso']}")
+        return False
+    
+    if not victima["vivo"] or victima["rol"] == "Mafioso":
+        print(f"[DEBUG] Víctima no válida. Input: '{nombre_victima}'")
+        print(f"Jugadores válidos: {[j['nombre'] for j in jugadores if j['vivo'] and j['rol'] != 'Mafioso']}")
         return False
     
     # Registrar voto
     partida["votos_matar"][mafioso_id] = victima["id"]
+    print(f"[DEBUG] Voto registrado: {mafioso_id} -> {victima['nombre']} ({victima['id']})")
+    
     
     # Notificar al mafioso
-    user = await client.fetch_user(int(mafioso_id))
-    await user.send(f"✅ Has votado por eliminar a {victima_nombre}.")
+    try:
+        user = await client.fetch_user(int(mafioso_id))
+        await user.send(f"✅ Has votado por eliminar a {victima['nombre']}.")
+    except Exception as e:
+        print(f"[ERROR] No se pudo enviar DM: {e}")
     
     # Verificar si todos los mafiosos han votado
     mafiosos_vivos = [j for j in jugadores if j["rol"] == "Mafioso" and j["vivo"]]
     if len(partida["votos_matar"]) == len(mafiosos_vivos):
-        # Decidir la víctima (mayoría de votos)
-        votos = list(partida["votos_matar"].values())
-        victima_id = max(set(votos), key=votos.count)
+        print("[DEBUG] Todos los mafiosos han votado")
+        # Decidir víctima por mayoría
+        victima_id = max(
+            set(partida["votos_matar"].values()), 
+            key=list(partida["votos_matar"].values()).count
+        )
         victima = next(j for j in jugadores if j["id"] == victima_id)
         partida["victima_noche"] = victima_id
         
         # Notificar a los mafiosos
         for m in mafiosos_vivos:
-            user = await client.fetch_user(int(m["id"]))
-            await user.send(f"☠️ Los mafiosos han decidido eliminar a {victima['nombre']}.")
+            try:
+                user = await client.fetch_user(int(m["id"]))
+                await user.send(f"☠️ Decisión final: Eliminar a {victima['nombre']}")
+            except:
+                continue
     
     return True
 
@@ -448,9 +497,22 @@ async def terminar_partida(canal_id: str):
 @client.event
 async def on_ready():
     print(f'✅ Bot conectado como {client.user}')
+    print('✅ Bot conectado - Debug inicial funcionando')  # <-- Añade esto
 
 @client.event
 async def on_message(message):
+
+    # Debug para todos los mensajes
+    print(f"\n📨 Mensaje recibido - Tipo: {'DM' if isinstance(message.channel, discord.DMChannel) else 'Server'}")
+    print(f"Contenido: {repr(message.content)}")
+    print(f"Autor: {message.author} (ID: {message.author.id})")
+    print(f"Canal: {message.channel} (ID: {message.channel.id})")
+
+    if isinstance(message.channel, discord.DMChannel):
+        print("🔒 Este es un mensaje directo (DM)")
+        # Debug adicional para DMs
+        print(f"Bot puede ver DM: {message.channel.me}")  # Debería mostrar info del bot
+
     if message.author == client.user:
         return
     
@@ -496,6 +558,7 @@ async def on_message(message):
         
         # Comandos PRIVADOS (DMs)
         if isinstance(message.channel, discord.DMChannel):
+            print(f'[DM] De {message.author}: {message.content}')
             jugadores = jugadores_por_partida[canal_id]
             jugador = next((j for j in jugadores if j["id"] == str(message.author.id)), None)
             
@@ -510,12 +573,23 @@ async def on_message(message):
             # Comandos de noche
             if partida["estado"] == FaseJuego.NOCHE:
                 if message.content.startswith('!matar') and jugador["rol"] == "Mafioso":
-                    victima = ' '.join(message.content.split()[1:])
-                    if await procesar_voto_matar(str(message.author.id), victima, canal_id):
-                        await message.channel.send(f"✅ Voto para matar a {victima} registrado.")
+                    input_victima = message.content[len('!matar'):].strip()
+                    
+                    if not input_victima:
+                        await message.channel.send("❌ Usa: `!matar @jugador` o `!matar Nombre`")
+                        return
+                    
+                    if await procesar_voto_matar(
+                        mafioso_id=str(message.author.id), 
+                        nombre_victima=input_victima,  # Nombre del parámetro corregido
+                        canal_id=canal_id
+                    ):
+                        await message.channel.send(f"✅ Voto registrado contra {input_victima}")
                     else:
-                        await message.channel.send("❌ No puedes matar a ese jugador.")
-                    return
+                        await message.channel.send("❌ No puedes matar a ese jugador. Razones:")
+                        await message.channel.send("- No existe/no está vivo")
+                        await message.channel.send("- Es otro mafioso")
+                        await message.channel.send("- Comando mal formado")
                     
                 elif message.content.startswith('!proteger') and jugador["rol"] == "Doctor":
                     protegido = ' '.join(message.content.split()[1:])
